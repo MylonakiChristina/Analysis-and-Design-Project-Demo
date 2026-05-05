@@ -1,21 +1,30 @@
 let currentProdHistPeriod = 'day';
+let lastProdStateHash = "";
 
 function setupProductionScreen(){
   currentProdHistPeriod = 'day';
   renderProductionMonitor();
   renderProductionHistory();
   if(monitorInterval) clearInterval(monitorInterval);
+  
   monitorInterval = setInterval(()=>{
-    sharedState = loadState();
-    renderProductionMonitor();
-    renderProductionHistory();
-  }, 1000);
+    const newState = loadState();
+    const currentStateHash = JSON.stringify(newState.activeProductions) + newState.productionEntries.length;
+    
+    if (currentStateHash !== lastProdStateHash) {
+        sharedState = newState;
+        renderProductionMonitor();
+        renderProductionHistory();
+        lastProdStateHash = currentStateHash;
+    }
+  }, 2000);
 }
 
 function switchProdHistTab(period, btn){
   currentProdHistPeriod = period;
   document.querySelectorAll('#screen-production .tab').forEach(t=>t.classList.remove('active'));
   btn.classList.add('active');
+  lastProdStateHash = "";
   renderProductionHistory();
 }
 
@@ -31,6 +40,7 @@ function renderProductionHistory(){
   let list = sharedState.productionEntries
     .filter(e => e.completedAt >= since)
     .map(e => ({...e, _state: e.incomplete?'incomplete':'completed', _ts: e.completedAt}));
+    
   (sharedState.activeProductions||[]).forEach(p=>{
     list.push({
       machine: p.machine,
@@ -44,16 +54,21 @@ function renderProductionHistory(){
       _ts: p.startTime||now
     });
   });
+  
   if(filter){ list = list.filter(e => e.machine === filter); }
   list = list.sort((a,b)=>b._ts - a._ts);
 
+  const limitedList = list.slice(0, 30);
+
   const tbody = document.getElementById('prodHistTableBody');
   if(!tbody) return;
+  
   if(list.length===0){
     tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:20px;color:var(--gray-mid);">Δεν υπάρχουν εργασίες για την επιλεγμένη περίοδο.</td></tr>`;
     return;
   }
-  tbody.innerHTML = list.map(e=>{
+  
+  tbody.innerHTML = limitedList.map(e=>{
     let badge;
     switch(e._state){
       case 'completed':   badge = '<span class="badge badge-resolved">Ολοκληρωμένη</span>'; break;
@@ -75,71 +90,6 @@ function renderProductionHistory(){
       <td>${badge}</td>
     </tr>`;
   }).join('');
-}
-
-function downloadProductionHistory(){
-  const filterEl = document.getElementById('prodHistFilter');
-  const filter = filterEl ? filterEl.value : '';
-  const periodName = currentProdHistPeriod==='day'?'Ημέρα':currentProdHistPeriod==='week'?'Εβδομάδα':'Μήνας';
-  const periodMs = currentProdHistPeriod==='day' ? 86400000 :
-                   currentProdHistPeriod==='week' ? 7*86400000 : 30*86400000;
-  const since = Date.now() - periodMs;
-  let list = sharedState.productionEntries
-    .filter(e => e.completedAt >= since)
-    .map(e => ({...e, _state: e.incomplete?'Ημιτελής':'Ολοκληρωμένη', _ts: e.completedAt}));
-  (sharedState.activeProductions||[]).forEach(p=>{
-    list.push({
-      machine: p.machine, operator: p.operator, order: p.order,
-      piecesTarget: p.piecesTarget, expectedPieces: p.expectedPieces||0,
-      duration: p.elapsedSeconds||0, deadTime: p.deadTimeSeconds||0,
-      _state: p.status==='malfunction'?'Βλάβη':p.status==='paused'?'Παύση':'Σε εξέλιξη',
-      _ts: p.startTime||Date.now()
-    });
-  });
-  if(filter){ list = list.filter(e => e.machine === filter); }
-  list = list.sort((a,b)=>b._ts - a._ts);
-
-  let txt = '';
-  txt += '================================================================\n';
-  txt += '       ΑΝΑΦΟΡΑ ΠΑΡΑΓΩΓΗΣ - ProdPulse / PEBRO\n';
-  txt += '       Περίοδος: '+periodName+'\n';
-  if(filter) txt += '       Φίλτρο μηχανήματος: '+filter+'\n';
-  txt += '       Ημερομηνία έκδοσης: '+new Date().toLocaleString('el-GR')+'\n';
-  txt += '================================================================\n\n';
-  txt += 'Σύνολο εγγραφών: '+list.length+'\n\n';
-
-  if(list.length===0){
-    txt += '(Δεν υπάρχουν εργασίες για την επιλεγμένη περίοδο.)\n';
-  } else {
-    let totalDur=0, totalDead=0, totalPieces=0;
-    list.forEach((e,i)=>{
-      totalDur+=(e.duration||0); totalDead+=(e.deadTime||0); totalPieces+=(e.expectedPieces||0);
-      txt += '----------------------------------------------------------------\n';
-      txt += 'ΕΓΓΡΑΦΗ #'+(i+1)+'\n';
-      txt += '----------------------------------------------------------------\n';
-      txt += '  Ημερομηνία     : '+new Date(e._ts).toLocaleString('el-GR')+'\n';
-      txt += '  Μηχάνημα       : '+e.machine+'\n';
-      txt += '  Χειριστής      : '+e.operator+'\n';
-      txt += '  Παραγγελία     : '+(e.order||'—')+'\n';
-      txt += '  Στόχος Τεμαχίων: '+(e.piecesTarget||0)+'\n';
-      txt += '  Παραχθέντα     : '+(e.expectedPieces||0)+'\n';
-      txt += '  Διάρκεια       : '+formatTime(e.duration||0)+'\n';
-      txt += '  Νεκρός Χρόνος  : '+formatTime(e.deadTime||0)+'\n';
-      txt += '  Κατάσταση      : '+e._state+'\n\n';
-    });
-    txt += '================================================================\n';
-    txt += 'ΣΥΓΚΕΝΤΡΩΤΙΚΑ\n';
-    txt += '================================================================\n';
-    txt += '  Συνολική Διάρκεια Εργασιών: '+formatTime(totalDur)+'\n';
-    txt += '  Συνολικός Νεκρός Χρόνος   : '+formatTime(totalDead)+'\n';
-    txt += '  Συνολικά Παραχθέντα       : '+totalPieces+' τεμάχια\n';
-    const efficiency = (totalDur+totalDead)>0 ? Math.round((totalDur/(totalDur+totalDead))*100) : 0;
-    txt += '  Αποδοτικότητα             : '+efficiency+'%\n';
-  }
-  txt += '\n================================================================\n';
-
-  const filename = 'production_history_'+currentProdHistPeriod+(filter?'_'+filter:'')+'_'+new Date().toISOString().slice(0,10)+'.txt';
-  triggerDownload(filename, txt, 'text/plain');
 }
 
 function renderProductionMonitor(){
@@ -227,3 +177,67 @@ function computeProductionStats(){
   };
 }
 
+function downloadProductionHistory(){
+  const filterEl = document.getElementById('prodHistFilter');
+  const filter = filterEl ? filterEl.value : '';
+  const periodName = currentProdHistPeriod==='day'?'Ημέρα':currentProdHistPeriod==='week'?'Εβδομάδα':'Μήνας';
+  const periodMs = currentProdHistPeriod==='day' ? 86400000 :
+                   currentProdHistPeriod==='week' ? 7*86400000 : 30*86400000;
+  const since = Date.now() - periodMs;
+  let list = sharedState.productionEntries
+    .filter(e => e.completedAt >= since)
+    .map(e => ({...e, _state: e.incomplete?'Ημιτελής':'Ολοκληρωμένη', _ts: e.completedAt}));
+  (sharedState.activeProductions||[]).forEach(p=>{
+    list.push({
+      machine: p.machine, operator: p.operator, order: p.order,
+      piecesTarget: p.piecesTarget, expectedPieces: p.expectedPieces||0,
+      duration: p.elapsedSeconds||0, deadTime: p.deadTimeSeconds||0,
+      _state: p.status==='malfunction'?'Βλάβη':p.status==='paused'?'Παύση':'Σε εξέλιξη',
+      _ts: p.startTime||Date.now()
+    });
+  });
+  if(filter){ list = list.filter(e => e.machine === filter); }
+  list = list.sort((a,b)=>b._ts - a._ts);
+
+  let txt = '';
+  txt += '================================================================\n';
+  txt += '       ΑΝΑΦΟΡΑ ΠΑΡΑΓΩΓΗΣ - ProdPulse / PEBRO\n';
+  txt += '       Περίοδος: '+periodName+'\n';
+  if(filter) txt += '       Φίλτρο μηχανήματος: '+filter+'\n';
+  txt += '       Ημερομηνία έκδοσης: '+new Date().toLocaleString('el-GR')+'\n';
+  txt += '================================================================\n\n';
+  txt += 'Σύνολο εγγραφών: '+list.length+'\n\n';
+
+  if(list.length===0){
+    txt += '(Δεν υπάρχουν εργασίες για την επιλεγμένη περίοδο.)\n';
+  } else {
+    let totalDur=0, totalDead=0, totalPieces=0;
+    list.forEach((e,i)=>{
+      totalDur+=(e.duration||0); totalDead+=(e.deadTime||0); totalPieces+=(e.expectedPieces||0);
+      txt += '----------------------------------------------------------------\n';
+      txt += 'ΕΓΓΡΑΦΗ #'+(i+1)+'\n';
+      txt += '----------------------------------------------------------------\n';
+      txt += '  Ημερομηνία     : '+new Date(e._ts).toLocaleString('el-GR')+'\n';
+      txt += '  Μηχάνημα       : '+e.machine+'\n';
+      txt += '  Χειριστής      : '+e.operator+'\n';
+      txt += '  Παραγγελία     : '+(e.order||'—')+'\n';
+      txt += '  Στόχος Τεμαχίων: '+(e.piecesTarget||0)+'\n';
+      txt += '  Παραχθέντα     : '+(e.expectedPieces||0)+'\n';
+      txt += '  Διάρκεια       : '+formatTime(e.duration||0)+'\n';
+      txt += '  Νεκρός Χρόνος  : '+formatTime(e.deadTime||0)+'\n';
+      txt += '  Κατάσταση      : '+e._state+'\n\n';
+    });
+    txt += '================================================================\n';
+    txt += 'ΣΥΓΚΕΝΤΡΩΤΙΚΑ\n';
+    txt += '================================================================\n';
+    txt += '  Συνολική Διάρκεια Εργασιών: '+formatTime(totalDur)+'\n';
+    txt += '  Συνολικός Νεκρός Χρόνος   : '+formatTime(totalDead)+'\n';
+    txt += '  Συνολικά Παραχθέντα       : '+totalPieces+' τεμάχια\n';
+    const efficiency = (totalDur+totalDead)>0 ? Math.round((totalDur/(totalDur+totalDead))*100) : 0;
+    txt += '  Αποδοτικότητα             : '+efficiency+'%\n';
+  }
+  txt += '\n================================================================\n';
+
+  const filename = 'production_history_'+currentProdHistPeriod+(filter?'_'+filter:'')+'_'+new Date().toISOString().slice(0,10)+'.txt';
+  triggerDownload(filename, txt, 'text/plain');
+}
