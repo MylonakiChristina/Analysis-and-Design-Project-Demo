@@ -1,11 +1,18 @@
+let lastTechStateHash = "";
+
 function setupTechnicalScreen(){
   renderTechActiveAlert();
   renderMalfunctionHistory();
   if(monitorInterval) clearInterval(monitorInterval);
   monitorInterval = setInterval(()=>{
-    sharedState = loadState();
-    renderTechActiveAlert();
-    renderMalfunctionHistory();
+    const newState = loadState();
+    const currentStateHash = JSON.stringify(newState.malfunctions);
+    if (currentStateHash !== lastTechStateHash) {
+        sharedState = newState;
+        renderTechActiveAlert();
+        renderMalfunctionHistory();
+        lastTechStateHash = currentStateHash;
+    }
   }, 3000);
 }
 
@@ -38,14 +45,56 @@ function renderTechActiveAlert(){
   document.getElementById('techActiveContent').innerHTML = html;
 }
 
+function renderMalfunctionHistory(){
+  const filter = document.getElementById('techFilter').value;
+  let list = [...sharedState.malfunctions].reverse();
+  
+  if(filter){ list = list.filter(m=>m.machine===filter); }
+  
+  const limitedList = list.slice(0, 20);
+  
+  const tbody = document.getElementById('malfunctionTableBody');
+  if(limitedList.length===0){
+    tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:20px;color:var(--gray-mid);">Δεν υπάρχουν καταχωρημένες βλάβες.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = limitedList.map(m=>{
+    const dur = m.status==='resolved' ? formatTime(m.deadTime) :
+                m.status==='repairing' ? formatTime(Math.floor((Date.now()-m.repairStart)/1000))+' (σε εξέλιξη)' :
+                '—';
+    const statusBadge = m.status==='resolved' ? '<span class="badge badge-resolved">Αποκαταστάθηκε</span>' :
+                       m.status==='repairing' ? '<span class="badge badge-pending">Σε εξέλιξη</span>' :
+                       '<span class="badge badge-active">Εκκρεμεί</span>';
+    const resolutionText = m.repairResolution ? escapeHtml(m.repairResolution) : '—';
+    const fmtCost = v => (v!==undefined && v!==null && !isNaN(v)) ? Number(v).toFixed(2)+' €' : '—';
+    const repairCost = (m.cost!==undefined && m.cost!==null) ? Number(m.cost) : null;
+    const extCost = (m.externalCost!==undefined && m.externalCost!==null) ? Number(m.externalCost) : 0;
+    const total = (m.totalCost!==undefined && m.totalCost!==null)
+      ? Number(m.totalCost)
+      : (repairCost!==null ? repairCost + extCost : null);
+    return `<tr>
+      <td>${m.machine}</td>
+      <td>${new Date(m.time).toLocaleString('el-GR')}</td>
+      <td>${m.operator}</td>
+      <td>${m.repairCategory ? escapeHtml(m.repairCategory) : (m.category||'—')}</td>
+      <td style="max-width:280px;white-space:normal;">${resolutionText}</td>
+      <td>${dur}</td>
+      <td>${fmtCost(repairCost)}</td>
+      <td>${m.externalPartner==='Ναι' ? fmtCost(extCost) : '—'}</td>
+      <td><strong>${fmtCost(total)}</strong></td>
+      <td>${m.externalPartner || '—'}</td>
+      <td>${statusBadge}</td>
+    </tr>`;
+  }).join('');
+}
+
 function startRepair(mfId){
   const m = sharedState.malfunctions.find(x=>x.id===mfId);
   if(!m) return;
   m.status = 'repairing';
   m.repairStart = Date.now();
   saveState();
-  renderTechActiveAlert();
-  renderMalfunctionHistory();
+  lastTechStateHash = "";
 }
 
 let _repairTargetId = null;
@@ -104,49 +153,9 @@ function confirmRepairComplete(){
   m.externalCost = ext ? extCost : 0;               
   m.totalCost = cost + (ext ? extCost : 0);          
   saveState();
+  lastTechStateHash = ""; // Force UI refresh
   document.getElementById('repairCompleteModal').classList.remove('active');
   _repairTargetId = null;
-  renderTechActiveAlert();
-  renderMalfunctionHistory();
-}
-
-function renderMalfunctionHistory(){
-  const filter = document.getElementById('techFilter').value;
-  let list = sharedState.malfunctions.slice().reverse();
-  if(filter){ list = list.filter(m=>m.machine===filter); }
-  const tbody = document.getElementById('malfunctionTableBody');
-  if(list.length===0){
-    tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:20px;color:var(--gray-mid);">Δεν υπάρχουν καταχωρημένες βλάβες.</td></tr>`;
-    return;
-  }
-  tbody.innerHTML = list.map(m=>{
-    const dur = m.status==='resolved' ? formatTime(m.deadTime) :
-                m.status==='repairing' ? formatTime(Math.floor((Date.now()-m.repairStart)/1000))+' (σε εξέλιξη)' :
-                '—';
-    const statusBadge = m.status==='resolved' ? '<span class="badge badge-resolved">Αποκαταστάθηκε</span>' :
-                       m.status==='repairing' ? '<span class="badge badge-pending">Σε εξέλιξη</span>' :
-                       '<span class="badge badge-active">Εκκρεμεί</span>';
-    const resolutionText = m.repairResolution ? escapeHtml(m.repairResolution) : '—';
-    const fmtCost = v => (v!==undefined && v!==null && !isNaN(v)) ? Number(v).toFixed(2)+' €' : '—';
-    const repairCost = (m.cost!==undefined && m.cost!==null) ? Number(m.cost) : null;
-    const extCost = (m.externalCost!==undefined && m.externalCost!==null) ? Number(m.externalCost) : 0;
-    const total = (m.totalCost!==undefined && m.totalCost!==null)
-      ? Number(m.totalCost)
-      : (repairCost!==null ? repairCost + extCost : null);
-    return `<tr>
-      <td>${m.machine}</td>
-      <td>${new Date(m.time).toLocaleString('el-GR')}</td>
-      <td>${m.operator}</td>
-      <td>${m.repairCategory ? escapeHtml(m.repairCategory) : (m.category||'—')}</td>
-      <td style="max-width:280px;white-space:normal;">${resolutionText}</td>
-      <td>${dur}</td>
-      <td>${fmtCost(repairCost)}</td>
-      <td>${m.externalPartner==='Ναι' ? fmtCost(extCost) : '—'}</td>
-      <td><strong>${fmtCost(total)}</strong></td>
-      <td>${m.externalPartner || '—'}</td>
-      <td>${statusBadge}</td>
-    </tr>`;
-  }).join('');
 }
 
 function escapeHtml(s){
@@ -253,7 +262,6 @@ function downloadMalfunctionReport(){
     txt += '  ΓΕΝΙΚΟ ΣΥΝΟΛΟ            : '+totalAll.toFixed(2)+' €\n';
   }
   txt += '\n================================================================\n';
-
   const filename = 'malfunction_report_'+new Date().toISOString().slice(0,10)+'.txt';
   triggerDownload(filename, txt, 'text/plain');
 }
