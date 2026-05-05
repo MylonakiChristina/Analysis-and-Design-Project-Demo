@@ -1,267 +1,228 @@
-let lastTechStateHash = "";
+let currentProdHistPeriod = 'day';
 
-function setupTechnicalScreen(){
-  renderTechActiveAlert();
-  renderMalfunctionHistory();
+function setupProductionScreen(){
+  currentProdHistPeriod = 'day';
+  renderProductionMonitor();
+  renderProductionHistory();
   if(monitorInterval) clearInterval(monitorInterval);
   monitorInterval = setInterval(()=>{
-    const newState = loadState();
-    const currentStateHash = JSON.stringify(newState.malfunctions);
-    if (currentStateHash !== lastTechStateHash) {
-        sharedState = newState;
-        renderTechActiveAlert();
-        renderMalfunctionHistory();
-        lastTechStateHash = currentStateHash;
-    }
-  }, 3000);
+    sharedState = loadState();
+    renderProductionMonitor();
+    renderProductionHistory();
+  }, 1000);
 }
 
-function renderTechActiveAlert(){
-  const active = sharedState.malfunctions.filter(m => m.status==='pending' || m.status==='repairing');
-  const box = document.getElementById('techActiveAlert');
-  if(active.length===0){ box.style.display='none'; return; }
-  box.style.display='block';
-  let html = '';
-  active.forEach(m=>{
-    const isRepairing = m.status==='repairing';
-    html += `
-      <div class="notification ${isRepairing?'':'malfunction'}" style="margin-bottom:14px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;flex-wrap:wrap;gap:10px;">
-          <div>
-            <strong>${m.machine}</strong> — ${m.operator}<br>
-            <small>Ώρα: ${new Date(m.time).toLocaleString('el-GR')}</small><br>
-            <small>Κατηγορία: ${m.category}</small>
-            ${isRepairing?`<br><small style="color:var(--orange);"><strong>Σε εξέλιξη αποκατάσταση...</strong> Νεκρός χρόνος: ${formatTime(Math.floor((Date.now()-m.repairStart)/1000))}</small>`:''}
-          </div>
-          <div style="display:flex;flex-direction:column;gap:6px;">
-            ${!isRepairing
-              ? `<button class="btn btn-warn" onclick="startRepair('${m.id}')">▶ Έναρξη Αποκατάστασης</button>`
-              : `<button class="btn btn-success" onclick="endRepair('${m.id}')">✓ Λήξη Αποκατάστασης</button>`}
-          </div>
-        </div>
-      </div>
-    `;
+function switchProdHistTab(period, btn){
+  currentProdHistPeriod = period;
+  document.querySelectorAll('#screen-production .tab').forEach(t=>t.classList.remove('active'));
+  btn.classList.add('active');
+  renderProductionHistory();
+}
+
+function renderProductionHistory(){
+  const filterEl = document.getElementById('prodHistFilter');
+  if(!filterEl) return;
+  const filter = filterEl.value;
+  const now = Date.now();
+  const periodMs = currentProdHistPeriod==='day' ? 86400000 :
+                   currentProdHistPeriod==='week' ? 7*86400000 : 30*86400000;
+  const since = now - periodMs;
+
+  let list = sharedState.productionEntries
+    .filter(e => e.completedAt >= since)
+    .map(e => ({...e, _state: e.incomplete?'incomplete':'completed', _ts: e.completedAt}));
+  (sharedState.activeProductions||[]).forEach(p=>{
+    list.push({
+      machine: p.machine,
+      operator: p.operator,
+      order: p.order,
+      piecesTarget: p.piecesTarget,
+      expectedPieces: p.expectedPieces||0,
+      duration: p.elapsedSeconds||0,
+      deadTime: p.deadTimeSeconds||0,
+      _state: p.status==='malfunction' ? 'malfunction' : p.status==='paused' ? 'paused' : 'running',
+      _ts: p.startTime||now
+    });
   });
-  document.getElementById('techActiveContent').innerHTML = html;
-}
+  if(filter){ list = list.filter(e => e.machine === filter); }
+  list = list.sort((a,b)=>b._ts - a._ts);
 
-function renderMalfunctionHistory(){
-  const filter = document.getElementById('techFilter').value;
-  let list = [...sharedState.malfunctions].reverse();
-  
-  if(filter){ list = list.filter(m=>m.machine===filter); }
-  
-  const limitedList = list.slice(0, 20);
-  
-  const tbody = document.getElementById('malfunctionTableBody');
-  if(limitedList.length===0){
-    tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:20px;color:var(--gray-mid);">Δεν υπάρχουν καταχωρημένες βλάβες.</td></tr>`;
+  const tbody = document.getElementById('prodHistTableBody');
+  if(!tbody) return;
+  if(list.length===0){
+    tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:20px;color:var(--gray-mid);">Δεν υπάρχουν εργασίες για την επιλεγμένη περίοδο.</td></tr>`;
     return;
   }
-  tbody.innerHTML = limitedList.map(m=>{
-    const dur = m.status==='resolved' ? formatTime(m.deadTime) :
-                m.status==='repairing' ? formatTime(Math.floor((Date.now()-m.repairStart)/1000))+' (σε εξέλιξη)' :
-                '—';
-    const statusBadge = m.status==='resolved' ? '<span class="badge badge-resolved">Αποκαταστάθηκε</span>' :
-                       m.status==='repairing' ? '<span class="badge badge-pending">Σε εξέλιξη</span>' :
-                       '<span class="badge badge-active">Εκκρεμεί</span>';
-    const resolutionText = m.repairResolution ? escapeHtml(m.repairResolution) : '—';
-    const fmtCost = v => (v!==undefined && v!==null && !isNaN(v)) ? Number(v).toFixed(2)+' €' : '—';
-    const repairCost = (m.cost!==undefined && m.cost!==null) ? Number(m.cost) : null;
-    const extCost = (m.externalCost!==undefined && m.externalCost!==null) ? Number(m.externalCost) : 0;
-    const total = (m.totalCost!==undefined && m.totalCost!==null)
-      ? Number(m.totalCost)
-      : (repairCost!==null ? repairCost + extCost : null);
+  tbody.innerHTML = list.map(e=>{
+    let badge;
+    switch(e._state){
+      case 'completed':   badge = '<span class="badge badge-resolved">Ολοκληρωμένη</span>'; break;
+      case 'incomplete':  badge = '<span class="badge badge-pending">Ημιτελής</span>'; break;
+      case 'running':     badge = '<span class="badge" style="background:#E8F5E9;color:#2E7D32;">Σε εξέλιξη</span>'; break;
+      case 'paused':      badge = '<span class="badge" style="background:#FFF8E1;color:#F57F17;">Παύση</span>'; break;
+      case 'malfunction': badge = '<span class="badge badge-active">Βλάβη</span>'; break;
+      default:            badge = '<span class="badge">—</span>';
+    }
     return `<tr>
-      <td>${m.machine}</td>
-      <td>${new Date(m.time).toLocaleString('el-GR')}</td>
-      <td>${m.operator}</td>
-      <td>${m.repairCategory ? escapeHtml(m.repairCategory) : (m.category||'—')}</td>
-      <td style="max-width:280px;white-space:normal;">${resolutionText}</td>
-      <td>${dur}</td>
-      <td>${fmtCost(repairCost)}</td>
-      <td>${m.externalPartner==='Ναι' ? fmtCost(extCost) : '—'}</td>
-      <td><strong>${fmtCost(total)}</strong></td>
-      <td>${m.externalPartner || '—'}</td>
-      <td>${statusBadge}</td>
+      <td>${new Date(e._ts).toLocaleString('el-GR')}</td>
+      <td>${e.machine}</td>
+      <td>${e.operator}</td>
+      <td>${e.order||'—'}</td>
+      <td>${e.piecesTarget||0}</td>
+      <td>${e.expectedPieces||0}</td>
+      <td>${formatTime(e.duration||0)}</td>
+      <td>${formatTime(e.deadTime||0)}</td>
+      <td>${badge}</td>
     </tr>`;
   }).join('');
 }
 
-function startRepair(mfId){
-  const m = sharedState.malfunctions.find(x=>x.id===mfId);
-  if(!m) return;
-  m.status = 'repairing';
-  m.repairStart = Date.now();
-  saveState();
-  lastTechStateHash = "";
-}
-
-let _repairTargetId = null;
-function endRepair(mfId){
-  _repairTargetId = mfId;
-  document.getElementById('repairCategoryInput').value = '';
-  document.getElementById('repairResolutionInput').value = '';
-  document.getElementById('repairCostInput').value = '';
-  document.getElementById('repairExternal').checked = false;
-  document.getElementById('repairExternalCostInput').value = '';
-  document.getElementById('externalCostGroup').style.display = 'none';
-  document.getElementById('repairFormError').innerHTML = '';
-  document.getElementById('repairCompleteModal').classList.add('active');
-}
-function toggleExternalCostField(){
-  const checked = document.getElementById('repairExternal').checked;
-  const grp = document.getElementById('externalCostGroup');
-  grp.style.display = checked ? 'block' : 'none';
-  if(!checked){
-    document.getElementById('repairExternalCostInput').value = '';
-  }
-}
-function cancelRepairComplete(){
-  _repairTargetId = null;
-  document.getElementById('repairCompleteModal').classList.remove('active');
-}
-function confirmRepairComplete(){
-  if(!_repairTargetId) return;
-  const m = sharedState.malfunctions.find(x=>x.id===_repairTargetId);
-  if(!m){ cancelRepairComplete(); return; }
-  const cat = document.getElementById('repairCategoryInput').value.trim();
-  const resolution = document.getElementById('repairResolutionInput').value.trim();
-  const costRaw = document.getElementById('repairCostInput').value;
-  const cost = parseFloat(costRaw);
-  const ext = document.getElementById('repairExternal').checked;
-  const extCostRaw = document.getElementById('repairExternalCostInput').value;
-  const extCost = parseFloat(extCostRaw);
-  const errBox = document.getElementById('repairFormError');
-  errBox.innerHTML = '';
-  if(!cat){ errBox.innerHTML='<div class="error-msg">Συμπληρώστε την κατηγορία βλάβης.</div>'; return; }
-  if(!resolution){ errBox.innerHTML='<div class="error-msg">Συμπληρώστε τον τρόπο αντιμετώπισης.</div>'; return; }
-  if(costRaw===''||isNaN(cost)||cost<0){ errBox.innerHTML='<div class="error-msg">Συμπληρώστε έγκυρο κόστος επισκευής (>= 0).</div>'; return; }
-  if(ext){
-    if(extCostRaw===''||isNaN(extCost)||extCost<0){
-      errBox.innerHTML='<div class="error-msg">Συμπληρώστε έγκυρο κόστος συνεργασίας με εξωτερικό συνεργάτη (>= 0).</div>';
-      return;
-    }
-  }
-  m.status = 'resolved';
-  m.repairEnd = Date.now();
-  m.deadTime = Math.floor((m.repairEnd - (m.repairStart||m.repairEnd))/1000);
-  m.repairCategory = cat;
-  m.repairResolution = resolution;
-  m.cost = cost;                                     
-  m.externalPartner = ext ? 'Ναι':'Όχι';
-  m.externalCost = ext ? extCost : 0;               
-  m.totalCost = cost + (ext ? extCost : 0);          
-  saveState();
-  lastTechStateHash = ""; // Force UI refresh
-  document.getElementById('repairCompleteModal').classList.remove('active');
-  _repairTargetId = null;
-}
-
-function escapeHtml(s){
-  return String(s).replace(/[&<>"']/g, function(c){
-    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+function downloadProductionHistory(){
+  const filterEl = document.getElementById('prodHistFilter');
+  const filter = filterEl ? filterEl.value : '';
+  const periodName = currentProdHistPeriod==='day'?'Ημέρα':currentProdHistPeriod==='week'?'Εβδομάδα':'Μήνας';
+  const periodMs = currentProdHistPeriod==='day' ? 86400000 :
+                   currentProdHistPeriod==='week' ? 7*86400000 : 30*86400000;
+  const since = Date.now() - periodMs;
+  let list = sharedState.productionEntries
+    .filter(e => e.completedAt >= since)
+    .map(e => ({...e, _state: e.incomplete?'Ημιτελής':'Ολοκληρωμένη', _ts: e.completedAt}));
+  (sharedState.activeProductions||[]).forEach(p=>{
+    list.push({
+      machine: p.machine, operator: p.operator, order: p.order,
+      piecesTarget: p.piecesTarget, expectedPieces: p.expectedPieces||0,
+      duration: p.elapsedSeconds||0, deadTime: p.deadTimeSeconds||0,
+      _state: p.status==='malfunction'?'Βλάβη':p.status==='paused'?'Παύση':'Σε εξέλιξη',
+      _ts: p.startTime||Date.now()
+    });
   });
-}
+  if(filter){ list = list.filter(e => e.machine === filter); }
+  list = list.sort((a,b)=>b._ts - a._ts);
 
-function utf8ToBase64(str){
-  return btoa(unescape(encodeURIComponent(str)));
-}
-
-function triggerDownload(filename, content, mimeType){
-  const bom = '\ufeff';
-  const fullContent = bom + content;
-  let downloadStarted = false;
-  try{
-    const dataUri = 'data:'+mimeType+';charset=utf-8;base64,'+utf8ToBase64(fullContent);
-    const a = document.createElement('a');
-    a.href = dataUri;
-    a.download = filename;
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(function(){ if(a.parentNode) a.parentNode.removeChild(a); }, 100);
-    downloadStarted = true;
-  }catch(e){
-    console.warn('Data URI download failed:', e);
-  }
-  showDownloadFallback(filename, fullContent, downloadStarted);
-}
-
-function showDownloadFallback(filename, content, downloadAttempted){
-  const overlay = document.getElementById('downloadFallbackModal');
-  document.getElementById('downloadFallbackTitle').textContent = filename;
-  document.getElementById('downloadFallbackTextarea').value = content;
-  document.getElementById('downloadFallbackHint').textContent = downloadAttempted
-    ? 'Αν η λήψη δεν ξεκίνησε αυτόματα (π.χ. ο browser την μπλόκαρε), μπορείτε να αντιγράψετε το περιεχόμενο ή να το αποθηκεύσετε χειροκίνητα.'
-    : 'Η αυτόματη λήψη δεν είναι διαθέσιμη. Αντιγράψτε το περιεχόμενο και επικολλήστε το σε αρχείο.';
-  overlay.classList.add('active');
-}
-
-function copyDownloadFallbackContent(){
-  const ta = document.getElementById('downloadFallbackTextarea');
-  ta.select();
-  ta.setSelectionRange(0, 99999);
-  let ok = false;
-  try{ ok = document.execCommand('copy'); }catch(e){}
-  if(navigator.clipboard && navigator.clipboard.writeText){
-    navigator.clipboard.writeText(ta.value).then(()=>{
-      document.getElementById('downloadFallbackHint').innerHTML = '<span style="color:#388E3C;font-weight:600;">✓ Το περιεχόμενο αντιγράφηκε στο πρόχειρο.</span>';
-    }).catch(()=>{});
-  } else if(ok){
-    document.getElementById('downloadFallbackHint').innerHTML = '<span style="color:#388E3C;font-weight:600;">✓ Το περιεχόμενο αντιγράφηκε στο πρόχειρο.</span>';
-  }
-}
-
-function closeDownloadFallback(){
-  document.getElementById('downloadFallbackModal').classList.remove('active');
-}
-
-function downloadMalfunctionReport(){
-  const now = new Date();
   let txt = '';
   txt += '================================================================\n';
-  txt += '         ΑΝΑΦΟΡΑ ΒΛΑΒΩΝ - ProdPulse / PEBRO\n';
-  txt += '         Ημερομηνία έκδοσης: '+now.toLocaleString('el-GR')+'\n';
+  txt += '       ΑΝΑΦΟΡΑ ΠΑΡΑΓΩΓΗΣ - ProdPulse / PEBRO\n';
+  txt += '       Περίοδος: '+periodName+'\n';
+  if(filter) txt += '       Φίλτρο μηχανήματος: '+filter+'\n';
+  txt += '       Ημερομηνία έκδοσης: '+new Date().toLocaleString('el-GR')+'\n';
   txt += '================================================================\n\n';
+  txt += 'Σύνολο εγγραφών: '+list.length+'\n\n';
 
-  const malfs = sharedState.malfunctions.slice().sort((a,b)=>new Date(b.time)-new Date(a.time));
-  txt += 'Συνολικά καταγεγραμμένες βλάβες: '+malfs.length+'\n\n';
-
-  if(malfs.length===0){
-    txt += '(Δεν υπάρχουν καταγεγραμμένες βλάβες.)\n';
+  if(list.length===0){
+    txt += '(Δεν υπάρχουν εργασίες για την επιλεγμένη περίοδο.)\n';
   } else {
-    let totalRepair=0, totalCollab=0, totalAll=0;
-    malfs.forEach((m,i)=>{
-      const rc = Number(m.cost)||0;
-      const ec = Number(m.externalCost)||0;
-      const tc = (m.totalCost!==undefined&&m.totalCost!==null) ? Number(m.totalCost) : (rc+ec);
-      totalRepair+=rc; totalCollab+=ec; totalAll+=tc;
+    let totalDur=0, totalDead=0, totalPieces=0;
+    list.forEach((e,i)=>{
+      totalDur+=(e.duration||0); totalDead+=(e.deadTime||0); totalPieces+=(e.expectedPieces||0);
       txt += '----------------------------------------------------------------\n';
-      txt += 'ΒΛΑΒΗ #'+(i+1)+'\n';
+      txt += 'ΕΓΓΡΑΦΗ #'+(i+1)+'\n';
       txt += '----------------------------------------------------------------\n';
-      txt += '  Μηχάνημα            : '+m.machine+'\n';
-      txt += '  Ώρα Βλάβης          : '+new Date(m.time).toLocaleString('el-GR')+'\n';
-      txt += '  Χειριστής           : '+m.operator+'\n';
-      txt += '  Κατηγορία           : '+(m.repairCategory||m.category||'—')+'\n';
-      txt += '  Τρόπος Αντιμετώπισης: '+(m.repairResolution||'—')+'\n';
-      txt += '  Διάρκεια Νεκρού Χρ.: '+formatTime(m.deadTime||0)+'\n';
-      txt += '  Κόστος Επισκευής   : '+rc.toFixed(2)+' €\n';
-      txt += '  Εξωτ. Συνεργάτης   : '+(m.externalPartner||'Όχι')+'\n';
-      if(m.externalPartner==='Ναι'){
-        txt += '  Κόστος Συνεργασίας : '+ec.toFixed(2)+' €\n';
-      }
-      txt += '  ΣΥΝΟΛΙΚΟ ΚΟΣΤΟΣ    : '+tc.toFixed(2)+' €\n';
-      txt += '  Κατάσταση          : '+(m.status==='resolved'?'Αποκαταστάθηκε':m.status==='repairing'?'Σε εξέλιξη':'Εκκρεμεί')+'\n\n';
+      txt += '  Ημερομηνία     : '+new Date(e._ts).toLocaleString('el-GR')+'\n';
+      txt += '  Μηχάνημα       : '+e.machine+'\n';
+      txt += '  Χειριστής      : '+e.operator+'\n';
+      txt += '  Παραγγελία     : '+(e.order||'—')+'\n';
+      txt += '  Στόχος Τεμαχίων: '+(e.piecesTarget||0)+'\n';
+      txt += '  Παραχθέντα     : '+(e.expectedPieces||0)+'\n';
+      txt += '  Διάρκεια       : '+formatTime(e.duration||0)+'\n';
+      txt += '  Νεκρός Χρόνος  : '+formatTime(e.deadTime||0)+'\n';
+      txt += '  Κατάσταση      : '+e._state+'\n\n';
     });
     txt += '================================================================\n';
     txt += 'ΣΥΓΚΕΝΤΡΩΤΙΚΑ\n';
     txt += '================================================================\n';
-    txt += '  Συνολικό Κόστος Επισκευών : '+totalRepair.toFixed(2)+' €\n';
-    txt += '  Συνολικό Κόστος Συνεργασιών: '+totalCollab.toFixed(2)+' €\n';
-    txt += '  ΓΕΝΙΚΟ ΣΥΝΟΛΟ            : '+totalAll.toFixed(2)+' €\n';
+    txt += '  Συνολική Διάρκεια Εργασιών: '+formatTime(totalDur)+'\n';
+    txt += '  Συνολικός Νεκρός Χρόνος   : '+formatTime(totalDead)+'\n';
+    txt += '  Συνολικά Παραχθέντα       : '+totalPieces+' τεμάχια\n';
+    const efficiency = (totalDur+totalDead)>0 ? Math.round((totalDur/(totalDur+totalDead))*100) : 0;
+    txt += '  Αποδοτικότητα             : '+efficiency+'%\n';
   }
   txt += '\n================================================================\n';
-  const filename = 'malfunction_report_'+new Date().toISOString().slice(0,10)+'.txt';
+
+  const filename = 'production_history_'+currentProdHistPeriod+(filter?'_'+filter:'')+'_'+new Date().toISOString().slice(0,10)+'.txt';
   triggerDownload(filename, txt, 'text/plain');
+}
+
+function renderProductionMonitor(){
+  const monitor = document.getElementById('productionMonitor');
+  const active = sharedState.activeProductions;
+  if(active.length===0){
+    monitor.innerHTML = `<div class="info-msg">Δεν υπάρχουν ενεργές παραγωγές αυτή τη στιγμή.</div>`;
+  }else{
+    monitor.innerHTML = active.map(p=>{
+      const cls = p.status==='malfunction'?'malfunction':p.status==='paused'?'paused':'';
+      const statusText = p.status==='malfunction'?'⚠ ΒΛΑΒΗ':p.status==='paused'?'⏸ Παύση':'● Σε λειτουργία';
+      const statusColor = p.status==='malfunction'?'#FFEBEE;color:#D32F2F':p.status==='paused'?'#FFF8E1;color:#F57F17':'#E8F5E9;color:#2E7D32';
+      return `
+        <div class="monitor-card ${cls}">
+          <h4>${p.machine}</h4>
+          <div class="status" style="background:${statusColor.split(';')[0]};color:${statusColor.split(';color:')[1]};">${statusText}</div>
+          <div class="timer-mini">${formatTime(p.elapsedSeconds||0)}</div>
+          <div class="info"><strong>Χειριστής:</strong> ${p.operator}</div>
+          <div class="info"><strong>Παραγγελία:</strong> ${p.order}</div>
+          <div class="info"><strong>Στόχος:</strong> ${p.piecesTarget} τεμάχια</div>
+          <div class="info"><strong>Αναμενόμενα:</strong> ${p.expectedPieces||0} τεμάχια</div>
+          <div class="info"><strong>Νεκρός χρόνος:</strong> ${formatTime(p.deadTimeSeconds||0)}</div>
+        </div>
+      `;
+    }).join('');
+  }
+  const stats = computeProductionStats();
+  document.getElementById('productionStats').innerHTML = `
+    <div class="kpi-card">
+      <div class="label">Ενεργές Παραγωγές</div>
+      <div class="value">${stats.activeCount}</div>
+      <div class="sub">Μηχανήματα σε λειτουργία</div>
+    </div>
+    <div class="kpi-card">
+      <div class="label">Ολοκληρωμένες Σήμερα</div>
+      <div class="value">${stats.completedToday}</div>
+      <div class="sub">Παραγγελίες</div>
+    </div>
+    <div class="kpi-card">
+      <div class="label">Συνολικός Νεκρός Χρόνος</div>
+      <div class="value">${stats.totalDeadTime}</div>
+      <div class="sub">Όλες οι ενεργές βάρδιες</div>
+    </div>
+    <div class="kpi-card">
+      <div class="label">Ενεργές Βλάβες</div>
+      <div class="value" style="color:var(--red);">${stats.activeMalfunctions}</div>
+      <div class="sub">Σε εκκρεμότητα</div>
+    </div>
+    <div class="kpi-card">
+      <div class="label">Εκτιμώμενη Απόδοση</div>
+      <div class="value">${stats.efficiency}%</div>
+      <div class="sub">Παραγωγικός χρόνος / Συνολικός</div>
+    </div>
+    <div class="kpi-card">
+      <div class="label">Συνολικά Τεμάχια Σήμερα</div>
+      <div class="value">${stats.totalPieces}</div>
+      <div class="sub">Αναμενόμενα</div>
+    </div>
+  `;
+}
+
+function computeProductionStats(){
+  const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+  const completed = sharedState.productionEntries.filter(e=>e.completedAt>=todayStart.getTime());
+  let totalProductive = 0, totalDead = 0, totalPieces=0;
+  sharedState.activeProductions.forEach(p=>{
+    totalProductive += (p.elapsedSeconds||0);
+    totalDead += (p.deadTimeSeconds||0);
+    totalPieces += (p.expectedPieces||0);
+  });
+  completed.forEach(e=>{
+    totalProductive += e.duration;
+    totalDead += e.deadTime;
+    totalPieces += e.expectedPieces;
+  });
+  const total = totalProductive + totalDead;
+  const eff = total>0 ? Math.round((totalProductive/total)*100) : 0;
+  return {
+    activeCount: sharedState.activeProductions.length,
+    completedToday: completed.length,
+    totalDeadTime: formatTime(totalDead),
+    activeMalfunctions: sharedState.malfunctions.filter(m=>m.status==='pending'||m.status==='repairing').length,
+    efficiency: eff,
+    totalPieces: totalPieces
+  };
 }
